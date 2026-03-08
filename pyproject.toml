@@ -1,0 +1,22 @@
+[project]
+name = "torch-md"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "tfharrelson", email = "tharrel4@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "dscribe>=2.1.2",
+    "jaxtyping>=0.3.2",
+    "numpy>=2.3.2",
+    "torch>=2.7.1",
+]
+
+[project.scripts]
+torch-md = "torch_md:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
