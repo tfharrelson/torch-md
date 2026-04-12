@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=3.0.0",
     "dscribe>=2.1.2",
     "duckdb>=1.4.4",
     "fairchem-core>=2.16.0",

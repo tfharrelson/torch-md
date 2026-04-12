@@ -16,6 +16,10 @@ class DbConfig(BaseSettings):
     )
 
 
+class ParquetSinkConfig(BaseModel):
+    base_dir: UPath
+
+
 class SourceConfig(BaseModel):
     data_path: UPath
     batch_size: int

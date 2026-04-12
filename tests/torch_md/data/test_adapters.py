@@ -1,113 +1,131 @@
+from pathlib import Path
+
 from duckdb import DuckDBPyConnection
 import numpy as np
+import patito as pt
 from assertpy import assert_that
+from upath import UPath
 
-from torch_md.data.adapters import DuckDbAdapter, DuckDbViewReader
+from torch_md.data.adapters import DuckDbSink, DuckDbSource, ParquetSink
 from torch_md.data.models import Calculation
-from torch_md.datasets import ReaderDataset, DFTData
+from torch_md.datasets import create_dataset, DFTData
 
 
-class TestDuckDbAdapter:
-    def test_load(self, duckdb_conn: DuckDBPyConnection):
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        id = 1
-        calc = Calculation(
-            id=id,
-            formula="H2O",
-            energy=12.0,
-            forces=np.random.random(size=(3, 3)),
-            positions=np.random.random(size=(3, 3)),
-            masses=np.random.random(size=(3,)),
-        )
-        adapter.load([calc])
-        # TODO: change this once the connection api is plumbed through the adapter
+def _make_calculation_df(n: int, id_offset: int = 0) -> pt.DataFrame[Calculation]:
+    """Build a pt.DataFrame[Calculation] with n rows of random test data."""
+    num_atoms = 3
+    return pt.DataFrame[Calculation](
+        {
+            "id": list(range(id_offset, id_offset + n)),
+            "formula": [f"H2O_{i}" for i in range(id_offset, id_offset + n)],
+            "energy": [float(i) for i in range(id_offset, id_offset + n)],
+            "forces": [np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)],
+            "positions": [np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)],
+            "masses": [np.random.random(size=(num_atoms,)).tolist() for _ in range(n)],
+        }
+    )
+
+
+class TestDuckDbSink:
+    def test_write(self, duckdb_conn: DuckDBPyConnection):
+        sink = DuckDbSink(conn=duckdb_conn)
+        df = _make_calculation_df(1)
+        sink.write(df)
+
         rows = duckdb_conn.sql("select id from calculations").fetchall()
         _ = assert_that(rows).is_length(1)
-        _ = assert_that(rows[0][0]).is_equal_to(id)
+        _ = assert_that(rows[0][0]).is_equal_to(0)
+
+    def test_write_appends(self, duckdb_conn: DuckDBPyConnection):
+        sink = DuckDbSink(conn=duckdb_conn)
+        sink.write(_make_calculation_df(2, id_offset=0))
+        sink.write(_make_calculation_df(3, id_offset=2))
+
+        rows = duckdb_conn.sql("select id from calculations order by id").fetchall()
+        _ = assert_that(rows).is_length(5)
+        _ = assert_that([r[0] for r in rows]).is_equal_to([0, 1, 2, 3, 4])
 
 
-class TestDuckDbViewReader:
-    def test_read_batch_returns_empty_list_at_end(self, duckdb_conn: DuckDBPyConnection):
-        calc = Calculation(
-            id=1,
-            formula="H2O",
-            energy=12.0,
-            forces=np.random.random(size=(3, 3)),
-            positions=np.random.random(size=(3, 3)),
-            masses=np.random.random(size=(3,)),
-        )
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        adapter.load([calc])
+class TestParquetSink:
+    def test_write_creates_parquet_files(self, tmp_path: Path):
+        sink = ParquetSink(UPath(tmp_path))
+        df = _make_calculation_df(5)
+        sink.write(df)
 
-        reader = DuckDbViewReader(duckdb_conn, "calculations", batch_size=1, val_size=0.0, test_size=0.0)
+        parquet_files = list(tmp_path.glob("*.parquet"))
+        _ = assert_that(parquet_files).is_length(1)
+        _ = assert_that(parquet_files[0].name).is_equal_to("shard_00000.parquet")
 
-        batch1 = reader.read_batch()
+    def test_write_multiple_shards(self, tmp_path: Path):
+        sink = ParquetSink(UPath(tmp_path))
+        sink.write(_make_calculation_df(3, id_offset=0))
+        sink.write(_make_calculation_df(3, id_offset=3))
+
+        parquet_files = sorted(tmp_path.glob("*.parquet"))
+        _ = assert_that(parquet_files).is_length(2)
+        _ = assert_that(parquet_files[0].name).is_equal_to("shard_00000.parquet")
+        _ = assert_that(parquet_files[1].name).is_equal_to("shard_00001.parquet")
+
+
+class TestDuckDbSource:
+    def test_read_batch_returns_empty_at_end(self, duckdb_conn: DuckDBPyConnection):
+        sink = DuckDbSink(conn=duckdb_conn)
+        sink.write(_make_calculation_df(1))
+
+        source = DuckDbSource(duckdb_conn, "calculations", batch_size=1, val_size=0.0, test_size=0.0)
+
+        batch1 = source.read_batch()
         _ = assert_that(len(batch1)).is_equal_to(1)
-        _ = assert_that(batch1[0].id).is_equal_to(1)
+        _ = assert_that(batch1["id"].to_list()).is_equal_to([0])
 
-        batch2 = reader.read_batch()
-        _ = assert_that(batch2).is_equal_to([])
+        batch2 = source.read_batch()
+        _ = assert_that(len(batch2)).is_equal_to(0)
 
     def test_reset_resets_offset(self, duckdb_conn: DuckDBPyConnection):
-        calculations = [
-            Calculation(
-                id=i,
-                formula=f"H2O_{i}",
-                energy=float(i),
-                forces=np.random.random(size=(3, 3)),
-                positions=np.random.random(size=(3, 3)),
-                masses=np.random.random(size=(3,)),
-            )
-            for i in range(10)
-        ]
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        adapter.load(calculations)
+        sink = DuckDbSink(conn=duckdb_conn)
+        sink.write(_make_calculation_df(10))
 
-        reader = DuckDbViewReader(duckdb_conn, "calculations", batch_size=5, val_size=0.0, test_size=0.0)
+        source = DuckDbSource(duckdb_conn, "calculations", batch_size=5, val_size=0.0, test_size=0.0)
 
-        batch1 = reader.read_batch()
+        batch1 = source.read_batch()
         _ = assert_that(len(batch1)).is_equal_to(5)
-        _ = assert_that(batch1[0].id).is_equal_to(0)
 
-        batch2 = reader.read_batch()
+        batch2 = source.read_batch()
         _ = assert_that(len(batch2)).is_equal_to(5)
-        _ = assert_that(batch2[0].id).is_equal_to(5)
 
-        reader.reset()
-        batch3 = reader.read_batch()
+        source.reset()
+        batch3 = source.read_batch()
         _ = assert_that(len(batch3)).is_equal_to(5)
-        _ = assert_that(batch3[0].id).is_equal_to(0)
+        _ = assert_that(batch3["id"].to_list()[0]).is_equal_to(0)
 
     def test_train_val_test_split_no_overlap(self, duckdb_conn: DuckDBPyConnection):
-        calculations = [
-            Calculation(
-                id=i,
-                formula=f"H2O_{i}",
-                energy=float(i),
-                forces=np.random.random(size=(3, 3)),
-                positions=np.random.random(size=(3, 3)),
-                masses=np.random.random(size=(3,)),
-            )
-            for i in range(100)
-        ]
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        adapter.load(calculations)
+        sink = DuckDbSink(conn=duckdb_conn)
+        sink.write(_make_calculation_df(100))
 
-        reader = DuckDbViewReader(duckdb_conn, "calculations", batch_size=10, val_size=0.2, test_size=0.1)
+        source = DuckDbSource(duckdb_conn, "calculations", batch_size=10, val_size=0.2, test_size=0.1)
 
-        train_r, val_r, test_r = reader.train_val_test_split()
+        train_s, val_s, test_s = source.train_val_test_split()
 
-        train_ids = set()
-        while batch := train_r.read_batch():
-            train_ids.update(c.id for c in batch)
+        train_ids: set[int] = set()
+        while True:
+            batch = train_s.read_batch()
+            if len(batch) == 0:
+                break
+            train_ids.update(batch["id"].to_list())
 
-        val_ids = set()
-        while batch := val_r.read_batch():
-            val_ids.update(c.id for c in batch)
+        val_ids: set[int] = set()
+        while True:
+            batch = val_s.read_batch()
+            if len(batch) == 0:
+                break
+            val_ids.update(batch["id"].to_list())
 
-        test_ids = set()
-        while batch := test_r.read_batch():
-            test_ids.update(c.id for c in batch)
+        test_ids: set[int] = set()
+        while True:
+            batch = test_s.read_batch()
+            if len(batch) == 0:
+                break
+            test_ids.update(batch["id"].to_list())
 
         _ = assert_that(train_ids.isdisjoint(val_ids)).is_true()
         _ = assert_that(train_ids.isdisjoint(test_ids)).is_true()
@@ -116,49 +134,36 @@ class TestDuckDbViewReader:
         total = len(train_ids) + len(val_ids) + len(test_ids)
         _ = assert_that(total).is_equal_to(100)
 
-    def test_reader_dataset_integration(self, duckdb_conn: DuckDBPyConnection):
-        calculations = [
-            Calculation(
-                id=i,
-                formula=f"H2O_{i}",
-                energy=float(i),
-                forces=np.random.random(size=(3, 3)),
-                positions=np.random.random(size=(3, 3)),
-                masses=np.random.random(size=(3,)),
-            )
-            for i in range(20)
-        ]
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        adapter.load(calculations)
 
-        reader = DuckDbViewReader(duckdb_conn, "calculations", batch_size=5, val_size=0.0, test_size=0.0)
-        dataset = ReaderDataset(reader)
+class TestCreateDataset:
+    def test_create_dataset_from_parquet(self, tmp_path: Path):
+        sink = ParquetSink(UPath(tmp_path))
+        sink.write(_make_calculation_df(10))
 
-        all_ids = []
-        for calc in dataset:
-            all_ids.append(calc.id)
+        ds = create_dataset(tmp_path)
 
-        _ = assert_that(len(all_ids)).is_equal_to(20)
-        _ = assert_that(set(all_ids)).is_equal_to(set(range(20)))
+        rows = list(ds)
+        _ = assert_that(len(rows)).is_equal_to(10)
+        _ = assert_that(rows[0]).contains_key("id", "formula", "energy", "forces", "positions", "masses")
 
-    def test_dftdata_with_duckdb_reader(self, duckdb_conn: DuckDBPyConnection):
-        calculations = [
-            Calculation(
-                id=i,
-                formula=f"H2O_{i}",
-                energy=float(i),
-                forces=np.random.random(size=(3, 3)),
-                positions=np.random.random(size=(3, 3)),
-                masses=np.random.random(size=(3,)),
-            )
-            for i in range(100)
-        ]
-        adapter = DuckDbAdapter(conn=duckdb_conn)
-        adapter.load(calculations)
 
-        reader = DuckDbViewReader(duckdb_conn, "calculations", batch_size=10, val_size=0.2, test_size=0.1)
+class TestDFTData:
+    def test_dftdata_with_parquet(self, tmp_path: Path):
+        train_dir = tmp_path / "train"
+        val_dir = tmp_path / "val"
+        test_dir = tmp_path / "test"
 
-        data_module = DFTData(reader, batch_size=32, num_workers=0, persistent_workers=False)
+        for d, n, offset in [(train_dir, 70, 0), (val_dir, 20, 70), (test_dir, 10, 90)]:
+            sink = ParquetSink(UPath(d))
+            sink.write(_make_calculation_df(n, id_offset=offset))
+
+        data_module = DFTData(
+            train_dir=train_dir,
+            val_dir=val_dir,
+            test_dir=test_dir,
+            batch_size=32,
+            num_workers=0,
+        )
 
         data_module.setup("fit")
 
@@ -170,3 +175,7 @@ class TestDuckDbViewReader:
 
         _ = assert_that(len(train_batches)).is_greater_than(0)
         _ = assert_that(len(val_batches)).is_greater_than(0)
+
+        # Verify batch structure
+        first_batch = train_batches[0]
+        _ = assert_that(first_batch).contains_key("id", "formula", "energy", "forces", "positions", "masses")
