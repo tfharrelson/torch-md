@@ -19,8 +19,12 @@ def _make_calculation_df(n: int, id_offset: int = 0) -> pt.DataFrame[Calculation
             "id": list(range(id_offset, id_offset + n)),
             "formula": [f"H2O_{i}" for i in range(id_offset, id_offset + n)],
             "energy": [float(i) for i in range(id_offset, id_offset + n)],
-            "forces": [np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)],
-            "positions": [np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)],
+            "forces": [
+                np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)
+            ],
+            "positions": [
+                np.random.random(size=(num_atoms, 3)).tolist() for _ in range(n)
+            ],
             "masses": [np.random.random(size=(num_atoms,)).tolist() for _ in range(n)],
         }
     )
@@ -72,7 +76,9 @@ class TestDuckDbSource:
         sink = DuckDbSink(conn=duckdb_conn)
         sink.write(_make_calculation_df(1))
 
-        source = DuckDbSource(duckdb_conn, "calculations", batch_size=1, val_size=0.0, test_size=0.0)
+        source = DuckDbSource(
+            duckdb_conn, "calculations", batch_size=1, val_size=0.0, test_size=0.0
+        )
 
         batch1 = source.read_batch()
         _ = assert_that(len(batch1)).is_equal_to(1)
@@ -85,7 +91,9 @@ class TestDuckDbSource:
         sink = DuckDbSink(conn=duckdb_conn)
         sink.write(_make_calculation_df(10))
 
-        source = DuckDbSource(duckdb_conn, "calculations", batch_size=5, val_size=0.0, test_size=0.0)
+        source = DuckDbSource(
+            duckdb_conn, "calculations", batch_size=5, val_size=0.0, test_size=0.0
+        )
 
         batch1 = source.read_batch()
         _ = assert_that(len(batch1)).is_equal_to(5)
@@ -102,7 +110,9 @@ class TestDuckDbSource:
         sink = DuckDbSink(conn=duckdb_conn)
         sink.write(_make_calculation_df(100))
 
-        source = DuckDbSource(duckdb_conn, "calculations", batch_size=10, val_size=0.2, test_size=0.1)
+        source = DuckDbSource(
+            duckdb_conn, "calculations", batch_size=10, val_size=0.2, test_size=0.1
+        )
 
         train_s, val_s, test_s = source.train_val_test_split()
 
@@ -144,7 +154,9 @@ class TestCreateDataset:
 
         rows = list(ds)
         _ = assert_that(len(rows)).is_equal_to(10)
-        _ = assert_that(rows[0]).contains_key("id", "formula", "energy", "forces", "positions", "masses")
+        _ = assert_that(rows[0]).contains_key(
+            "id", "formula", "energy", "forces", "positions", "masses"
+        )
 
 
 class TestDFTData:
@@ -178,4 +190,6 @@ class TestDFTData:
 
         # Verify batch structure
         first_batch = train_batches[0]
-        _ = assert_that(first_batch).contains_key("id", "formula", "energy", "forces", "positions", "masses")
+        _ = assert_that(first_batch).contains_key(
+            "id", "formula", "energy", "forces", "positions", "masses"
+        )
