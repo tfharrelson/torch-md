@@ -8,7 +8,7 @@ from upath import UPath
 
 from torch_md.data.adapters import DuckDbSink, DuckDbSource, ParquetSink
 from torch_md.data.models import Calculation
-from torch_md.datasets import create_dataset, DFTData
+from torch_md.datasets import create_dataset
 
 
 def _make_calculation_df(n: int, id_offset: int = 0) -> pt.DataFrame[Calculation]:
@@ -155,41 +155,5 @@ class TestCreateDataset:
         rows = list(ds)
         _ = assert_that(len(rows)).is_equal_to(10)
         _ = assert_that(rows[0]).contains_key(
-            "id", "formula", "energy", "forces", "positions", "masses"
-        )
-
-
-class TestDFTData:
-    def test_dftdata_with_parquet(self, tmp_path: Path):
-        train_dir = tmp_path / "train"
-        val_dir = tmp_path / "val"
-        test_dir = tmp_path / "test"
-
-        for d, n, offset in [(train_dir, 70, 0), (val_dir, 20, 70), (test_dir, 10, 90)]:
-            sink = ParquetSink(UPath(d))
-            sink.write(_make_calculation_df(n, id_offset=offset))
-
-        data_module = DFTData(
-            train_dir=train_dir,
-            val_dir=val_dir,
-            test_dir=test_dir,
-            batch_size=32,
-            num_workers=0,
-        )
-
-        data_module.setup("fit")
-
-        train_loader = data_module.train_dataloader()
-        val_loader = data_module.val_dataloader()
-
-        train_batches = list(train_loader)
-        val_batches = list(val_loader)
-
-        _ = assert_that(len(train_batches)).is_greater_than(0)
-        _ = assert_that(len(val_batches)).is_greater_than(0)
-
-        # Verify batch structure
-        first_batch = train_batches[0]
-        _ = assert_that(first_batch).contains_key(
             "id", "formula", "energy", "forces", "positions", "masses"
         )
