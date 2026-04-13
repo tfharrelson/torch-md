@@ -23,7 +23,7 @@ class DuckDbSink(DataSink):
         if tbl_result is None:
             raise RuntimeError("SQL command failed")
 
-        arrow_table = data.to_arrow()
+        arrow_table = data.to_arrow()  # noqa: F841 - DuckDB resolves this from local scope
         if tbl_result[0] == 0:
             self._conn.sql("create table calculations as select * from arrow_table")
         else:
