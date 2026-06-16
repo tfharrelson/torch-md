@@ -32,8 +32,8 @@ def _collate_fn(batch: list[dict]) -> dict:
     # here. we should be able to do away with the middle man and just pass arrow
     # arrays to pytorch directly.
     return {
-        "id": [row["id"] for row in batch],
-        "formula": [row["formula"] for row in batch],
+        # "id": [row["id"] for row in batch],
+        # "formula": [row["formula"] for row in batch],
         "energy": torch.tensor([row["energy"] for row in batch]),
         "forces": [torch.tensor(row["forces"]) for row in batch],
         "positions": [torch.tensor(row["positions"]) for row in batch],

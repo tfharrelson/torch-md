@@ -2,6 +2,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import BaseModel
 from upath import UPath
 from typing import ClassVar
+from . import resources
+import yaml
+from enum import StrEnum
+import os
+
+
+class Env(StrEnum):
+    PROD = "prod"
+    DEV = "dev"
+
+
+def get_env() -> Env:
+    if os.environ.get("ENV") == "prod":
+        return Env.PROD
+    else:
+        return Env.DEV
 
 
 class DuckDbConfig(BaseModel):
@@ -31,3 +47,14 @@ class SourcesConfig(BaseSettings):
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_prefix="DEV_SRC_"
     )
+
+    @classmethod
+    def get(cls) -> "SourcesConfig":
+        if get_env() == Env.PROD:
+            raise NotImplementedError("Production config not implemented yet")
+        else:
+            with (
+                UPath(resources.__file__).parent / UPath("dev_config.yaml")
+            ).open() as f:
+                inputs = yaml.safe_load(f)
+            return cls(**inputs)

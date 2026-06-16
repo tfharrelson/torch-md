@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "accelerate>=1.14.0",
     "datasets>=3.0.0",
     "dscribe>=2.1.2",
     "duckdb>=1.4.4",
@@ -20,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "pytest>=9.0.2",
     "torch>=2.7.1",
+    "tqdm>=4.67.3",
     "universal-pathlib>=0.3.10",
 ]
 
