@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from tqdm import tqdm
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from torch import nn
+from torch.profiler import ProfilerActivity, profile, schedule
 from torch.utils.data import DataLoader
 from upath import UPath
 
@@ -32,10 +35,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--parquet-dir", type=Path, default=DEFAULT_PARQUET_DIR)
     parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--profile", type=bool, default=False)
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -89,81 +93,104 @@ def predict_energy_batch(model: nn.Module, inputs: list[torch.Tensor]) -> torch.
 
 def main() -> None:
     args = parse_args()
-    accelerator = Accelerator()
-    config = SourcesConfig.get()
+    if args.profile is True:
+        pfr = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(
+                wait=2,
+                warmup=2,
+                active=3,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler("./logs/profiler"),
+        )
+    else:
+        pfr = nullcontext()
+    with pfr as prof:
+        accelerator = Accelerator()
+        config = SourcesConfig.get()
 
-    if args.epochs < 1:
-        raise ValueError("--epochs must be at least 1")
-    if args.log_every < 1:
-        raise ValueError("--log-every must be at least 1")
+        if args.epochs < 1:
+            raise ValueError("--epochs must be at least 1")
+        if args.log_every < 1:
+            raise ValueError("--log-every must be at least 1")
 
-    if accelerator.is_main_process:
-        ensure_parquet_data(args.parquet_dir, accelerator)
-    accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            ensure_parquet_data(args.parquet_dir, accelerator)
+        accelerator.wait_for_everyone()
 
-    dataset = create_dataset(args.parquet_dir)  # .with_format("torch")
-    torch.multiprocessing.set_sharing_strategy("file_system")
-    dataloader = DataLoader(
-        dataset,  # type: ignore
-        batch_size=config.omol25.batch_size,
-        collate_fn=_collate_fn,
-        num_workers=4,
-    )
-    model = SimpleMLIP(d_model=args.d_model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        dataset = create_dataset(args.parquet_dir)  # .with_format("torch")
+        torch.multiprocessing.set_sharing_strategy("file_system")
+        dataloader = DataLoader(
+            dataset,  # type: ignore
+            batch_size=config.omol25.batch_size,
+            collate_fn=_collate_fn,
+            num_workers=4,
+        )
+        model = SimpleMLIP(d_model=args.d_model)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-
-    accelerator.print(
-        "Starting training: "
-        f"epochs={args.epochs}, batch_size={config.omol25.batch_size}, lr={args.lr}, "
-        f"d_model={args.d_model}, device={accelerator.device}"
-    )
-
-    global_step = 0
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        running_loss = 0.0
-        epoch_steps = 0
-        accelerator.print(f"Epoch {epoch}/{args.epochs} started")
-
-        for batch in dataloader:
-            optimizer.zero_grad()
-
-            inputs = build_mlip_inputs(batch, accelerator.device)
-            targets = batch["energy"].to(device=accelerator.device, dtype=torch.float32)
-            predictions = predict_energy_batch(model, inputs)
-            loss = F.mse_loss(predictions, targets)
-
-            accelerator.backward(loss)
-            optimizer.step()
-
-            loss_value = float(loss.detach().item())
-            running_loss += loss_value
-            epoch_steps += 1
-            global_step += 1
-
-            if global_step == 1 or global_step % args.log_every == 0:
-                avg_loss = running_loss / epoch_steps
-                accelerator.print(
-                    f"step={global_step} epoch={epoch} "
-                    f"batch_loss={loss_value:.6f} avg_epoch_loss={avg_loss:.6f}"
-                )
-
-            if args.max_steps is not None and global_step >= args.max_steps:
-                accelerator.print(f"Stopping early at max_steps={args.max_steps}")
-                break
-
-        if epoch_steps == 0:
-            raise RuntimeError("No training batches were produced from the dataset")
+        model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
         accelerator.print(
-            f"Epoch {epoch}/{args.epochs} finished; "
-            f"avg_loss={running_loss / epoch_steps:.6f}"
+            "Starting training: "
+            f"epochs={args.epochs}, batch_size={config.omol25.batch_size}, lr={args.lr}, "
+            f"d_model={args.d_model}, device={accelerator.device}"
         )
 
-        if args.max_steps is not None and global_step >= args.max_steps:
-            break
+        global_step = 0
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            running_loss = 0.0
+            epoch_steps = 0
+            accelerator.print(f"Epoch {epoch}/{args.epochs} started")
+
+            pbar = tqdm(dataloader)
+            for batch in pbar:
+                optimizer.zero_grad()
+
+                inputs = build_mlip_inputs(batch, accelerator.device)
+                targets = batch["energy"].to(
+                    device=accelerator.device, dtype=torch.float32
+                )
+                predictions = predict_energy_batch(model, inputs)
+                loss = F.mse_loss(predictions, targets)
+
+                accelerator.backward(loss)
+                optimizer.step()
+                if prof is not None:
+                    prof.step()
+
+                loss_value = float(loss.detach().item())
+                running_loss += loss_value
+                epoch_steps += 1
+                global_step += 1
+
+                if global_step == 1 or global_step % args.log_every == 0:
+                    avg_loss = running_loss / epoch_steps
+                    pbar.set_description(
+                        f"step={global_step} epoch={epoch} "
+                        f"batch_loss={loss_value:.6f} avg_epoch_loss={avg_loss:.6f}"
+                    )
+
+                if args.max_steps is not None and global_step >= args.max_steps:
+                    accelerator.print(f"Stopping early at max_steps={args.max_steps}")
+                    break
+                if args.profile and global_step >= 10:
+                    break
+            if args.profile and global_step >= 10:
+                break
+
+            if epoch_steps == 0:
+                raise RuntimeError("No training batches were produced from the dataset")
+
+            accelerator.print(
+                f"Epoch {epoch}/{args.epochs} finished; "
+                f"avg_loss={running_loss / epoch_steps:.6f}"
+            )
+
+            if args.max_steps is not None and global_step >= args.max_steps:
+                break
 
     accelerator.wait_for_everyone()
     unwrapped_model = accelerator.unwrap_model(model)

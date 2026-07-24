@@ -21,7 +21,13 @@ class SimpleMLIP(nn.Module):
         super().__init__()
         # TODO: make inputs configurable
         self._embedding = nn.Linear(4, d_model)
-        self._transformer = nn.Transformer(d_model=d_model)
+        self._transformer = nn.Transformer(
+            d_model=d_model,
+            nhead=2,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            dim_feedforward=d_model * 2,
+        )
         self._energy_head = nn.Linear(d_model, 1)
 
     @override
